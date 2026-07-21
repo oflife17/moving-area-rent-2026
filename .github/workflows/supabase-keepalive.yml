@@ -1,0 +1,85 @@
+name: Supabase keepalive
+
+on:
+  schedule:
+    # Supabase Free projects can pause after about a week of low activity.
+    # Three lightweight REST reads per day keeps database activity present
+    # without generating meaningful bandwidth or Actions usage.
+    - cron: "17 0,8,16 * * *"
+    # GitHub may disable scheduled workflows in public repositories after
+    # long repository inactivity. This monthly marker creates repository
+    # activity so the keepalive schedule itself stays enabled.
+    - cron: "29 2 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: https://fdmipgjzwhbnqjowobww.supabase.co
+  SUPABASE_ANON_KEY: sb_publishable_Bp939gcxUyp2zvAhdQv44Q_Dg4EMj0T
+  SUPABASE_TABLE: area_favorites
+
+jobs:
+  keepalive:
+    name: Query Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query favorites table
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          endpoint="${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=area_id&limit=1"
+          body_file="$(mktemp)"
+          status="$(curl --location --silent --show-error \
+            --output "${body_file}" \
+            --write-out "%{http_code}" \
+            --header "apikey: ${SUPABASE_ANON_KEY}" \
+            --header "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            --header "Accept: application/json" \
+            "${endpoint}")"
+
+          echo "Supabase HTTP status: ${status}"
+          if [[ "${status}" != "200" && "${status}" != "206" ]]; then
+            echo "::error::Supabase keepalive failed with HTTP ${status}"
+            cat "${body_file}"
+            exit 1
+          fi
+
+          bytes="$(wc -c < "${body_file}" | tr -d ' ')"
+          echo "Keepalive query succeeded (${bytes} bytes)."
+
+      - name: Checkout for monthly activity marker
+        if: github.event_name == 'schedule' && github.event.schedule == '29 2 1 * *'
+        uses: actions/checkout@v4
+
+      - name: Refresh monthly activity marker
+        if: github.event_name == 'schedule' && github.event.schedule == '29 2 1 * *'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .github
+          {
+            echo "Supabase keepalive marker"
+            echo "Last scheduled refresh: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "Project: fdmipgjzwhbnqjowobww"
+          } > .github/supabase-keepalive-last-run.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/supabase-keepalive-last-run.txt
+
+          if git diff --cached --quiet; then
+            echo "Marker already current."
+            exit 0
+          fi
+
+          git commit -m "Refresh Supabase keepalive marker"
+          git push
